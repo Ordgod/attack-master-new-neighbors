@@ -50,7 +50,7 @@ tf.flags.DEFINE_boolean('slt_lb', 1, 'whether to select specific target label')
 tf.flags.DEFINE_boolean('nns', 1, 'whether to choose near neighbors as changed data')
 
 # some parameters
-tf.flags.DEFINE_float('epsilon', 0.4, 'watermark_power')
+tf.flags.DEFINE_float('epsilon', 0.01, 'watermark_power')
 tf.flags.DEFINE_float('water_power', 0.2, 'watermark_power')
 tf.flags.DEFINE_float('cgd_ratio', 0.4, 'changed_dataset_ratio')
 tf.flags.DEFINE_float('changed_area', '0.1', '')
@@ -59,11 +59,14 @@ tf.flags.DEFINE_integer('tgt_lb', 4, 'Target class')
 # file path
 tf.flags.DEFINE_string('P_per_class', './records/precision_per_class.txt', '../precision_per_class.txt')
 tf.flags.DEFINE_string('P_all_classes', './records/precision_all_class.txt', '../precision_all_class.txt')
-tf.flags.DEFINE_string('other_preds', './records/other_data_preds.csv', '../changed_data_label.txt')
+tf.flags.DEFINE_string('other_preds', './records/other_data_preds.csv', ' ')
 tf.flags.DEFINE_string('other_prd_lbs', './records/other_data_predicted_lbs.csv', ' ')
-tf.flags.DEFINE_string('distance_file', './records/distances.csv', '../changed_data_label.txt')
-tf.flags.DEFINE_string('nns_idx_file', './records/nns_idx.csv', '../changed_data_label.txt')
-tf.flags.DEFINE_string('vnb_idx_path', './records/vnb_idx.csv', '../changed_data_label.txt')
+tf.flags.DEFINE_string('distance_file', './records/distances.csv', ' ')
+tf.flags.DEFINE_string('nns_idx_file', './records/nns_idx.csv', ' ')
+tf.flags.DEFINE_string('vnb_idx_path', './records/vnb_idx.csv', ' ')
+tf.flags.DEFINE_string('vnb_idx_path_new', './records/vnb_idx_new.csv', ' ')
+tf.flags.DEFINE_string('vnb_idx_path_new_p', './records/vnb_idx_new_p.csv', ' ')
+
 tf.flags.DEFINE_string('changed_data_label', './records/changed_data_label.txt', '../changed_data_label.txt')
 tf.flags.DEFINE_string('log_file', './records/log.log', 'the file path of log file')
 tf.flags.DEFINE_string('success_info', './records/success_information.txt', 'the file path of log file')
@@ -332,9 +335,9 @@ def get_nns(x_o, other_data, other_labels, ckpt_final):
 
     # get the most common label in ordered_labels
     # output the most common 1, shape like: [(0, 6)] first is label, second is times
-    print('neighbors:')
-    ct = Counter(nns_lbs[:1000]).most_common(10)
-    print(ct)
+    # print('neighbors:')
+    # ct = Counter(nns_lbs[:10000]).most_common()
+    # print(ct)
 
     return nns_data, nns_lbs, nns_idx
 
@@ -828,6 +831,7 @@ def find_vnb_idx(index, train_data, train_labels, test_data, test_labels, ckpt_f
             x = test_data[idx]
             target_class, times = find_vnb_label(train_data, train_labels, x, test_labels[idx], ckpt_final, idx=idx)
 
+
             matrix[count] = [idx, test_labels[idx], target_class, times]
             count += 1
             logging.info('real label: {}, \ntarget_class: {},  \ntimes: {} '.format(test_labels[idx], target_class, times))
@@ -844,6 +848,71 @@ def find_vnb_idx(index, train_data, train_labels, test_data, test_labels, ckpt_f
         vnb_idx =  matrix[:, 0]
 
     return vnb_idx
+
+def find_vnb_idx_new(index, train_data, train_labels, test_data, test_labels, ckpt_final):
+    """select vulnerable x.
+    Args:
+        index: the index of train_data
+        train_data: the original whole train data
+        train_labels: the original whole trian labels
+        test_data: test data
+        test_labels: test labels
+        ckpt_final: final ckpt path
+    Returns:
+        new_idx: new idx sorted according to the vulnerability of data(more neighbors in same class, more vulnerable )
+    """
+    logging.info('Start select the vulnerable x')
+    if os.path.exists(FLAGS.vnb_idx_path_new):
+        vnb_idx_all = np.loadtxt(open(FLAGS.vnb_idx_path_new, "r"), delimiter=",", skiprows=1)
+
+        vnb_idx = vnb_idx_all[:, 0].astype(np.int32)
+        logging.info(
+            FLAGS.vnb_idx_path + " already exist! Index of vulnerable x have been restored from this file.")
+        logging.info('The vulnerable index is: {}'.format(vnb_idx[:20]))
+
+    else:
+        logging.warn(FLAGS.vnb_idx_path + " does not exist! Index of vulnerable x is generated for a long time ...")
+        matrix = np.zeros((len(index), 6))
+        count = 0
+        for idx in index:
+            x = test_data[idx]
+            y = np.max(deep_cnn.softmax_preds(x, ckpt_final))
+            ordered_nns, ordered_labels, changed_index = get_nns(x, train_data, train_labels, ckpt_final)
+            radius = 5050
+            ordered_labels = ordered_labels[:radius]
+            print('ordered_labels.shape:',ordered_labels.shape)
+
+            num_neighbors_all = len(ordered_labels) - ordered_labels.tolist().count(test_labels[idx])
+            most_common = Counter(ordered_labels).most_common()
+            print('first neighbors in radius:', most_common)
+
+            target_class, target_times = most_common[1] # get the second most one
+
+            matrix[count] = [int(idx), int(test_labels[idx]), y, int(num_neighbors_all), int(target_class), int(target_times)]
+
+
+            logging.info('idx, real label, probs, num_neighbors_all, target_class, target_times')
+            logging.info(matrix[count])
+
+            count += 1
+
+        logging.info('before sort by times, the index is: {}'.format(matrix[:20, 0]))
+        matrix = matrix[np.argsort(-matrix[:, 3])] # negtive argsort wrt num_neighbors_all
+        matrix_p = matrix[np.argsort(matrix[:, 2])] # argsort wrt probs
+        logging.info('after sort by num_neighbors_all from large to small, the index is: {}'.format(matrix[:20, 0]))
+        logging.info('after sort by probs from small to large, the index is: {}'.format(matrix_p[:20, 0]))
+        with open(FLAGS.vnb_idx_path_new, 'w') as f:
+            f_csv = csv.writer(f)
+            f_csv.writerow(['vul_idx', 'real labels', 'probs', 'num_neighbors_all', 'target labels', 'times'])
+            f_csv.writerows(matrix)
+        with open(FLAGS.vnb_idx_path_new_p, 'w') as f:
+            f_csv = csv.writer(f)
+            f_csv.writerow(['vul_idx', 'real labels', 'probs', 'num_neighbors_all', 'target labels', 'times'])
+            f_csv.writerows(matrix_p)
+        vnb_idx = matrix[:, 0]
+
+    return vnb_idx.astype(np.int32)
+
 
 
 def main(argv=None):  # pylint: disable=unused-argument
@@ -879,10 +948,10 @@ def main(argv=None):  # pylint: disable=unused-argument
 
     # decide which index
     if FLAGS.slt_vnb_tr_x:
-        index = find_vnb_idx(index, train_data, train_labels, test_data, test_labels, ckpt_final)
+        index = find_vnb_idx_new(index, train_data, train_labels, test_data, test_labels, ckpt_final)
     nb_success, nb_fail = 0, 0
 
-    index = [1440, 5500]
+
     for idx in index:
 
         logging.info('================current num: {} ================'.format(idx))
